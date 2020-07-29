@@ -1,0 +1,207 @@
+---
+title: "GLMM evaluation"
+author: "Hao Lu"
+date: "June 15, 2019"
+output: html_document
+---
+```{r setup, include=FALSE}
+library(knitr)
+library(formatR)
+opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Set up analysis environment
+
+```{r}
+library(readxl)
+library(magrittr)
+library(lme4)
+library(car)
+library(tidyverse)
+library(lsmeans)
+library(afex)
+library(lsmeans)
+
+CI_data <- read_excel("M:/Lab_Shared/HaoLu/GLMM_Anoo/GLMM_stats_dataset.xlsx")
+
+# Set categorical data as factors:
+CI_data$ID %<>% as.factor()
+CI_data$Slope %<>% as.factor()
+CI_data$Position %<>% as.factor()
+CI_data$Channel %<>% as.factor()
+
+# Convert accuracy to success and failure counts
+CI_data$Accuracy = CI_data$Accuracy/100
+CI_data$Response = cbind(CI_data$Accuracy * 80,(1-CI_data$Accuracy)*80)
+
+#default contrast setting does not satisfy type-III anova assumption so it was reseted
+options(contrasts = c('contr.sum','contr.poly'))
+
+# Plot data 
+ggplot(CI_data,aes(x=Channel,y=Accuracy,group=ID,color=ID))+geom_line()+facet_grid(Position~Slope)
+```
+
+Each row shows accuracy of a Condition and each column shows accuracy of a Slope.
+
+According to the plot above and results of repeated measure ANOVA, dataset was split into two subsets before fitting model (Slope = 360 and other slope).
+
+```{r}
+# Split data into two groups for experiment 1 and experiment 2
+CI_data_exp1 = CI_data[CI_data$Slope==360,]
+CI_data_exp2 = CI_data[CI_data$Slope!=360,]
+
+# Drop the unused slope level in data of experiment 2 (slope = 360) 
+# This crucial because afex package will freak out without this line of code
+CI_data_exp2$Slope = droplevels(CI_data_exp2$Slope) 
+```
+
+Now all data is preprocessed and we are starting modeling
+
+# Experiment 1 data analysis
+
+## Fitting models
+
+The reviewer suggested to fit generalized linear mixed model (GLMM) using logit link function with lme4 R package. 
+
+Considering sample size and our general assumption, the global model we can fit includes all factors as main effects and a random intercept for each subject. I have tried more complicated random factor structure like adding random effect of position but the model failed to converge. So the model below is the best we can do here.
+
+```{r}
+m.1.full = glmer(Response ~ Position*Channel+(1|ID), data=CI_data_exp1,family='binomial'('logit'))
+summary(m.1.full)
+```
+
+Model summary of the GLMM we fitted is printed above. These items are:
+
+1. Name and method of the model.
+
+2. AIC, BIC and loglikelihood
+
+3. Model residuals ( = fitted value - measured value)
+
+4. Random effects: there is no specific estimate of "mean" for each level random effect and it is assumed that random effects are drawn from certain normal distribution
+
+5. Fixed effects: Estimates are the estimated model parameters. Because the first condition (Position=Low, Channel = 32) was treated as base line (intercept) , all parameters are the change of odd ratio from baseline to certain factor. The z and t values shown in this model are testing whether certain parameter is zero.
+
+6. Correlation of fixed factors
+
+There should also be correlation of random factors like what was described in Jaeger's paper but we only have one random intercept so it was omitted.
+
+## testing fixed effects
+
+Jaeger(2007) demonstrated example where fixed effect in GLMM were tested with Wald's Z test. This test is used to test if one parameter in the model is zero. In our case, because there are factors with multiple levels, more than one parameter was used to model an effect. For example, levels of position was fitted with three parameters: low(intercept), mid-low, high-low. Therefore, we applied parametric bootstrapping (PB) method suggested by Ben Bolker (https://bbolker.github.io/mixedmodels-misc/glmmFAQ.html) and realized by Henrik Singmann (http://www2.uaem.mx/r-mirror/web/packages/afex/afex.pdf).
+
+The following results are output from Henrik Singmann's afex::mix and it was copy and pasted because it usually takes hours to run bootstrap simulation,  simulation was used here)
+
+```{r}
+# below is the code used to generate PB result
+# exp1.mix = mixed(Response ~ Slope*Position*Channel+(1|ID), data=CI_data_exp2, family=binomial,method="PB",cl=cl,all_fit=FALSE,args_test=list(cl=cl, nsim=1000))
+
+# To save compling time, we simply read results saved before
+exp1.mix = readRDS("M:/Lab_Shared/HaoLu/GLMM_Anoo/Exp1_PB.rds")
+
+nice(exp1.mix)
+
+```
+
+Results of PB are pinted above.
+
+Notice that although chi squre values are shown. These p-values are NOT derived from chi squares, so these chi square values should NOT be reported with p-values.
+
+It can be seen that all effects are significant, so we are going to keep the global model as minimal adequate model for experiment 1 and it will be used for further analysis.
+
+## Comparison with chance level (50%)
+
+Then we want to test whether performance is significantly above chance level.
+
+Due to significant interaction between position and channel. We will have to specify level of both factors in comparison (e.g. Position = High, and Channel = 32 is significantly above chance). Also because we want to test whether performance is significantly above chance level, so all hypothesis tests are ont-tailed.
+
+```{r}
+m.1.means = lsmeans(m.1.full,pairwise~Channel:Position)
+summary(m.1.means,null=0,infer=c(TRUE,TRUE),adjust='bon',type='response',side='1')$lsmeans
+```
+
+Results showed that only Low/32 channel ondition is not significantly above 0
+
+Notice that all tests are performed on the logic scale which means we compare the logit transformed data with 0 (chance level in logit scale). The "prob" and 95% confidence interval of prob are transformed from logit result.
+
+## Pairwise comparison
+
+```{r}
+m.1.pairs = lsmeans(m.1.full,pairwise~Channel|Position)
+summary(m.1.pairs,type='response')$contrasts
+```
+
+If we only compare pairs with same target location (e.g. high/32 vs high/64), there are no significant difference between 48 and 64 channels when target tone is in low position.
+
+Notice that p-values are adjusted for 3 pairs of comparisons within a target position.
+
+# Experiment 2 data analysis
+
+## Fitting full models
+
+Similarly we start from a full model
+
+```{r}
+m.2.full = glmer(Response ~ Slope*Position*Channel+(1|ID), data=CI_data_exp2, family='binomial'('logit'))
+summary(m.2.full)
+```
+
+## Testing fixed effects
+
+```{r}
+#similarly here is the code to run PB but it is taking too long so I'll read results
+#exp2_mix = mixed(Response ~ Slope*Position*Channel+(1|ID), data=CI_data_exp2, family=binomial,method="PB",cl=cl,all_fit=FALSE,args_test=list(cl=cl, nsim=1000))
+exp2_mix = readRDS("M:/Lab_Shared/HaoLu/GLMM_Anoo/Exp2_PB.rds")
+nice(exp2_mix)
+```
+
+From the output, all main effects were significant and interaction between position and channel was significant. Therefore, the GLMM for experiment 2 can be simplified as:
+
+Response ~ Slope + Position + Channel + Position:Channel  +(1|ID)
+
+## Model selection
+
+We try to fit a new simplified model and compare it with the global model:
+
+```{r}
+m.2.alt = glmer(Response ~ Slope+Position+Channel+Position:Channel +(1|ID), data=CI_data_exp2, family='binomial')
+anova(m.2.full,m.2.alt)
+```
+
+The likelihood ratio test showed that the simpler model's deviance was significantly larger than the full model, but by reducing parameters, we have both better AIC and BIC, so to avoid overfitting problem, the simpler model was used for further analysis.
+
+```{r}
+summary(m.2.alt)
+```
+
+## Comparison with chance level (50%)
+
+```{r}
+m.2.means = lsmeans(m.2.alt,pairwise~Slope)
+summary(m.2.means,null=0,infer=c(TRUE),adjust='bon',side=1)$lsmeans
+```
+
+From results shown above, accuracy of conditions were slope was 72 were not significantly above chance level. Accuracy of conditions where slope was over 72 were mostly significantly above chance level (p<0.001 after bonferroni correction).
+
+```{r}
+m.2.means.2 = lsmeans(m.2.alt,pairwise~Position:Channel)
+summary(m.2.means.2,null=0,infer=c(TRUE),adjust='bon',side=1)$lsmeans
+```
+
+All Position/Channel conditions are significantly above chance level except low/64
+
+## Pairwise Comparison with chance level (50%)
+
+```{r}
+m.2.means.2 = lsmeans(m.2.alt,pairwise~Slope)
+summary(m.2.means.2)$contrasts
+```
+
+It seems that Slope 72 is significantly different from other slope while there is no significant difference between the rest.
+
+```{r}
+m.2.means.1 = lsmeans(m.2.alt,pairwise~Channel|Position)
+summary(m.2.means.1)$contrasts
+```
+
+There is no significant diffrence between channels when position is high or mid, but significant difference between 32 vs 64 and 48 vs 64 when position is low

@@ -1,0 +1,185 @@
+---
+title: "GLMM evaluation"
+author: "Hao Lu"
+date: "June 15, 2019"
+output: html_document
+---
+```{r setup, include=FALSE}
+library(knitr)
+library(formatR)
+opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Set up analysis environment
+
+```{r}
+library(readxl)
+library(magrittr)
+library(lme4)
+library(car)
+library(tidyverse)
+library(lsmeans)
+
+CI_data <- read_excel("M:/Lab_Shared/HaoLu/GLMM_Anoo/GLMM_stats_dataset.xlsx")
+
+# Set categorical data as factors:
+CI_data$ID %<>% as.factor()
+CI_data$Slope %<>% as.factor()
+CI_data$Position %<>% as.factor()
+CI_data$Channel %<>% as.factor()
+
+# Convert accuracy to success and failure counts
+CI_data$Accuracy = CI_data$Accuracy/100
+CI_data$Response = cbind(CI_data$Accuracy * 80,(1-CI_data$Accuracy)*80)
+
+#default contrast setting does not satisfy type-III anova assumption so it was reseted
+options(contrasts = c('contr.sum','contr.poly'))
+
+# Plot data 
+ggplot(CI_data,aes(x=Channel,y=Accuracy,group=ID,color=ID))+geom_line()+facet_grid(Position~Slope)
+```
+
+Each row shows accuracy of a Condition and each column shows accuracy of a Slope.
+
+According to the plot above and results of repeated measure ANOVA, dataset was split into two subsets before fitting model (Slope = 360 and other slope).
+
+```{r}
+# Split data into two groups for experiment 1 and experiment 2
+CI_data_exp1 = CI_data[CI_data$Slope==360,]
+CI_data_exp2 = CI_data[CI_data$Slope!=360,]
+
+# Drop the unused slope level in data of experiment 2 (slope = 360) 
+# This crucial because afex package will freak out without this line of code
+CI_data_exp2$Slope = droplevels(CI_data_exp2$Slope) 
+```
+
+Now all data is preprocessed and we are starting modeling
+
+# Experiment 1 data analysis
+
+## Fitting models
+
+The reviewer suggested to fit generalized linear mixed model (GLMM) using logit link function with lme4 R package. 
+
+Considering sample size and our general assumption, the global model we can fit includes all factors as main effects and a random intercept for each subject. I have tried more complicated random factor structure like adding random effect of position but the model failed to converge. So the model below is the best we can do here.
+
+```{r}
+m.1.full = glmer(Response ~ Position*Channel+(1|ID), data=CI_data_exp1,family='binomial'('logit'))
+summary(m.1.full)
+```
+
+Model summary is printed above. These items are:
+
+1. Name and method of the model.
+
+2. AIC, BIC and loglikelihood
+
+3. Model residuals ( = fitted value - measured value)
+
+4. Random effects: there is no specific estimate of "mean" for each level random effect and it is assumed that random effects are drawn from certain normal distribution
+
+5. Fixed effects: Estimates are the estimated model parameters. Because the first condition (Position=Low, Channel = 32) was treated as base line (intercept) , all parameters are the change of odd ratio from baseline to certain factor. The z and t values shown in this model are testing whether certain parameter is zero.
+
+6. Correlation of fixed factors
+
+There should also be correlation of random factors like what was described in Jaeger's paper but we only have one random intercept so it was omitted.
+
+
+# Experiment 2 data analysis
+
+## Fitting full models
+
+
+
+```{r}
+
+m.2.full = glmer(Response ~ Slope*Position*Channel+(1|ID), data=CI_data_exp2, family='binomial'('logit'))
+```
+
+## Testing effect
+
+Jaeger(2007) demonstrated example where fixed effect in GLMM were tested with Wald's Z test. This test is used to test if one parameter in the model is zero. In our case, because there are factors with multiple levels, more than one parameter was used to model an effect. For example, levels of position was fitted with three parameters: low(intercept), mid-low, high-low. Therefore, we applied parametric bootstrapping method suggested by Ben Bolker (https://bbolker.github.io/mixedmodels-misc/glmmFAQ.html) and realized by Henrik Singmann (http://www2.uaem.mx/r-mirror/web/packages/afex/afex.pdf).
+
+(The following results are output from Henrik Singmann's afex::mix and it was copy and pasted because it usually take hours to run bootstrap simulation, 500 simulation was used here)
+
+
+Experiment 1 model
+
+Model: Response ~ Position * Channel + (1 | ID)
+
+Data: CI_data_exp1
+            Effect df     Chisq p.value
+            
+1         Position  2  63.49 **    .002
+
+2          Channel  2 659.33 **    .004
+
+3 Position:Channel  4   10.23 *     .03
+
+---
+
+ Experiment 2 model
+ 
+Mixed Model Anova Table (Type 3 tests, PB-method)
+
+Model: Response ~ Slope:Position:Channel + (1 | ID)
+
+Data: CI_data_exp2
+                  Effect df    Chisq p.value
+                  
+1                  Slope  3 60.29 **    .002
+
+2               Position  2 15.00 **    .002
+
+3                Channel  2   9.21 *     .02
+
+4         Slope:Position  6  12.44 +     .05
+
+5          Slope:Channel  6   9.91 +     .09
+
+6       Position:Channel  4  11.09 *     .03
+
+7 Slope:Position:Channel 12    16.88     .15
+
+
+From the output, all main effects were significant and for both experiment 1 and 2, interaction between position and channel was significant. Therefore, the GLMM for experiment 2 can be simplified as:
+
+Response ~ Slope + Position + Channel + Position:Channel  +(1|ID)
+
+```{r}
+m.2.alt = glmer(Response ~ Slope+Position+Channel+Position:Channel +(1|ID), data=CI_data_exp2, family='binomial')
+anova(m.2.full,m.2.alt)
+```
+
+The likelihood ratio test showed that the simpler model's deviance was significantly larger than the full model, but by reducing parameters, we have both better AIC and BIC, so to avoid overfitting problem, the simpler model was used for further analysis.
+
+## Comparison with chance level (50%)
+
+```{r}
+m.1.means = lsmeans(m.1.full,pairwise~Position:Channel)
+summary(m.1.means,null=0,infer=c(TRUE,TRUE),adjust='bon')$lsmeans
+```
+
+The results above showed that except 32 channel and low position condition, all effects were significantly above chance level (p<0.005 after bonferroni correction)
+
+```{r}
+summary(m.1.means)
+```
+
+
+```{r}
+m.2.means = lsmeans(m.2.alt,pairwise~Position:Channel:Slope)
+summary(m.2.means,null=0,infer=c(TRUE),adjust='bon')$lsmeans
+```
+
+From results shown above, accuracy of conditions were slope was 72 were not significantly above chance level. Accuracy of conditions where slope was over 72 were mostly significantly above chance level (p<0.02 after bonferroni correction) except Low/64/96 and Low/64/120.
+
+
+```{r}
+m.2.means.1 = lsmeans(m.2.alt,pairwise~Position:Channel)
+summary(m.2.means.1)
+```
+```{r}
+m.2.means.2 = lsmeans(m.2.alt,pairwise~Slope)
+summary(m.2.means.2)
+```
