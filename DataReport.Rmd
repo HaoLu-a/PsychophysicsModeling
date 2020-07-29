@@ -1,0 +1,145 @@
+---
+title: "Hearing Threshold Data"
+author: "Hao Lu"
+date: "July 18, 2018"
+output: pdf_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message = FALSE, warning = FALSE, include=FALSE}
+library(dplyr)
+library(magrittr)
+library(tidyverse)
+library(gmodels)
+library(tinytex)
+library(gdata)
+library(emmeans)
+library(nlme)
+```
+
+
+# 1. Load and format data from xls file
+
+```{r}
+# load data into R
+data = read.csv("H:/AnooR/all_data_forR.csv",header = TRUE)
+
+# Rename variables
+names(data)[1] <- "Phase"
+
+# set variable as factor
+data$Phase %<>% as.factor()
+data$F0 %<>% as.factor()
+data$HarmonicNum %<>% as.factor()
+data$Subject %<>% as.factor()
+
+# Show the loaded data
+summary(data)
+```
+
+Four predictors (Phase, F0, Harmonic number, Subject code) were set as categorical.
+Response (Thresholds) remained numeric
+
+# 2. Check model assumptions
+
+```{r}
+# starting from a full model with all possible effects. The error correlation structure was set to be AR1 because no numeric predictors were used
+m1 <- lme(Thresholds ~ Phase*F0*HarmonicNum, data = data, random = ~1|Subject,correlation = corAR1())
+plot(m1)
+```
+
+The plot showed that variance residual increases with fitted values, so the error and fitted values are not independent.
+
+```{r}
+qqnorm(residuals(m1))
+```
+
+The QQ plot showed that the residuals had heavy tails, which also violate the assumption of normal distrubuted error.
+
+
+It has been shown that the original threshold could not be fitted with a repeated measurement linear model, so we consider doing a log transform on the thresholds.
+
+```{r}
+# log transform
+data$logThre <- log(data$Threshold)
+
+# fit a new model with the transformed data
+m2 <- lme(logThre ~ Phase*F0*HarmonicNum, data = data, random = ~1|Subject,correlation = corAR1())
+plot(m2)
+```
+
+This time it looks much better, the variance of residual doesn't change with fitted values.
+
+```{r}
+qqnorm(residuals(m2))
+```
+
+There are still heavy tails, but at least better than the original data.
+
+All following analyzation will use the transformed threshold data as response.
+
+#3. Model selection
+
+Now we need to find a best model to fit our data.
+
+For this dataset, the only random effect is subject.
+
+First, let's see if we can drop all effects include phase.
+
+```{r}
+# Fit the nested model to check if Phase could be dropped
+rm1 <- lme(logThre ~ Phase*F0*HarmonicNum, data = data, method = "ML", random = ~1|Subject, correlation = corAR1())
+rm2 <- lme(logThre ~ F0*HarmonicNum, data = data, method = "ML", random = ~1|Subject, correlation = corAR1())
+
+# Because we are testing a fixed effect between nested models, so the default model fitting method "REML" will not work and ML method should be specified
+anova(rm1,rm2)
+```
+
+Although dropping these effects related with phase improved both AIC and BIC, but our model was significantly worse at fitting data. Perhaps not all effects should be dropped.
+
+I usually tend to be conservative with this so I am not going to drop all effects.
+
+```{r}
+# test all fixed effects
+anova(rm1)
+```
+
+It can be seen that the two-way interaction of phase and F0 is still significant, so it should not be dropped.
+
+Therefore, we modify the model to keep the interaction of phase and F0 but drop the main effect of phase and the three-way interaction.
+
+```{r}
+rm3 <- lme(logThre ~ F0*HarmonicNum + Phase:F0 + Phase:HarmonicNum,data = data, method = "ML", random = ~1|Subject, correlation = corAR1())
+
+anova(rm1,rm3)
+```
+
+This result showed that this simplified model is as good as the full model in fitting the data. The new model also improved AIC and BIC because it has less predictors.
+
+This should be the model we are looking for.
+
+Check the error just in case.
+```{r}
+plot(rm3)
+```
+```{r}
+qqnorm(residuals(rm3))
+```
+
+Everything about model assumption looks good. I would choose the simpler model.
+
+Similarly, you can test different error correlation structures, I am just too lazy to do it here.
+
+# 4. Post hot tests
+
+Now we are going to show the pairwise test result with the model we chose.
+
+```{r}
+emmeans(rm3, pairwise ~ HarmonicNum|F0)$contrasts
+```
+
+The output above showed all pairs of harmonic numbers within a level of F0. One can easily see if there is significant difference between harmonic numbers through p value. The result was adjusted with tukey method to correct multiple comparison error.
